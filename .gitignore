@@ -3,3 +3,8 @@ data/
 *.db
 dist/
 .env
+.DS_Store
+npm_debug.log
+*.log
+.replit
+replit.nix

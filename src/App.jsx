@@ -69,6 +69,15 @@ function gradeColor(g) { return GRADE_COLORS[g] || '#6B7280'; }
 function gradeLabel(g) { return { easy:'Easy', moderate:'Moderate', medium:'Medium', high_risk:'High Risk', risky:'Risky' }[g] || g; }
 function gradeBadgeColor(g) { return { easy:'green', moderate:'blue', medium:'amber', high_risk:'amber', risky:'red' }[g] || 'gray'; }
 
+const PRIORITY_STYLES = {
+  P1: { color:'#DC2626', bg:'#FEF2F2', border:'#EF4444', badge:'red' },
+  P2: { color:'#EA580C', bg:'#FFF7ED', border:'#F97316', badge:'amber' },
+  P3: { color:'#D97706', bg:'#FFFBEB', border:'#F59E0B', badge:'amber' },
+  P4: { color:'#16A34A', bg:'#F0FDF4', border:'#34D399', badge:'green' },
+  P5: { color:'#7C3AED', bg:'#F5F3FF', border:'#8B5CF6', badge:'purple' },
+  P6: { color:'#9CA3AF', bg:'#F9FAFB', border:'#D1D5DB', badge:'gray' },
+};
+
 // ── useToast ──────────────────────────────────────────────────────────────────
 function useToast() {
   const [toasts, setToasts] = useState([]);
@@ -151,11 +160,13 @@ function KpiCards({ stats }) {
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 const NAV = [
   { section:'Collections', items:[
-    { id:'workqueue',  label:'Workqueue',       icon:'🗂' },
-    { id:'invoices',   label:'Invoices',         icon:'📄' },
-    { id:'disputes',   label:'Disputes',         icon:'⚠️',  badgeKey:'open_disputes', badgeColor:'red' },
-    { id:'promises',   label:'Promises to Pay',  icon:'🤝' },
-    { id:'intel',      label:'Customer Intel',   icon:'🧠' },
+    { id:'workqueue',   label:'Workqueue',        icon:'🗂' },
+    { id:'invoices',    label:'Invoices',          icon:'📄' },
+    { id:'disputes',    label:'Disputes',          icon:'⚠️',  badgeKey:'open_disputes', badgeColor:'red' },
+    { id:'promises',    label:'Promises to Pay',   icon:'🤝' },
+    { id:'dunning',     label:'Dunning Sequences', icon:'📨' },
+    { id:'intel',       label:'Customer Intel',    icon:'🧠' },
+    { id:'controller',  label:'Controller View',   icon:'📊' },
   ]},
   { section:'Early Payment', items:[
     { id:'offers',    label:'Offers',        icon:'🏷',  badgeKey:'active_offers', badgeColor:'purple' },
@@ -226,13 +237,6 @@ function Sidebar({ active, onChange, stats }) {
 }
 
 // ── WorkqueueView ─────────────────────────────────────────────────────────────
-const SEVERITY = dpd => dpd >= 60 ? 'critical' : dpd >= 8 ? 'warning' : dpd >= 1 ? 'mild' : 'current';
-const SEV_STYLE = {
-  critical: { border:'4px solid #EF4444', bg:'#FEF2F2', txt:'#DC2626' },
-  warning:  { border:'4px solid #F97316', bg:'#FFF7ED', txt:'#EA580C' },
-  mild:     { border:'4px solid #F59E0B', bg:'#FFFBEB', txt:'#D97706' },
-  current:  { border:'4px solid #10B981', bg:'#fff',    txt:'#059669' },
-};
 
 function OfferFormRow({ invoice, onSubmit, onCancel }) {
   const [pct, setPct]     = useState(suggestDiscount(invoice.days_past_due));
@@ -333,7 +337,7 @@ function WorkqueueView({ invoices, onSendOffer, onWithdraw, onRowClick, stats })
           <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
             <thead>
               <tr style={{ background:'#1A3C5E', color:'#fff' }}>
-                {['','#','Customer','Amount','Due Date','Days Past Due','Status','Offer','Action'].map((h,i) => (
+                {['Priority','#','Customer','Amount','Due Date','DPD','Status','Offer','Action'].map((h,i) => (
                   <th key={i} style={{ textAlign:'left', padding:'10px 12px', fontSize:11, fontWeight:600, textTransform:'uppercase', letterSpacing:'0.04em', whiteSpace:'nowrap' }}>{h}</th>
                 ))}
               </tr>
@@ -342,8 +346,8 @@ function WorkqueueView({ invoices, onSendOffer, onWithdraw, onRowClick, stats })
               {!invoices && <tr><td colSpan={9} style={{ textAlign:'center', padding:40, color:'#9CA3AF' }}>Loading…</td></tr>}
               {invoices && filtered.length === 0 && <tr><td colSpan={9} style={{ textAlign:'center', padding:40, color:'#9CA3AF' }}>No invoices match this filter.</td></tr>}
               {filtered.map(inv => {
-                const sev = inv.status === 'paid' ? null : SEVERITY(inv.days_past_due);
-                const ss = sev ? SEV_STYLE[sev] : null;
+                const p = inv.priority || {};
+                const ps = p.tier ? PRIORITY_STYLES[p.tier] : null;
                 const hasActiveOffer = inv.offer_id && inv.offer_status === 'active';
                 const hasAcceptedOffer = inv.offer_id && inv.offer_status === 'accepted';
                 return (
@@ -351,22 +355,34 @@ function WorkqueueView({ invoices, onSendOffer, onWithdraw, onRowClick, stats })
                     <tr onClick={e => { if (e.target.tagName !== 'BUTTON') onRowClick(inv.id); }}
                       style={{
                         borderBottom:'1px solid #F3F4F6', cursor:'pointer',
-                        borderLeft: ss ? ss.border : '4px solid #E5E7EB',
-                        background: ss ? ss.bg : '#fff',
+                        borderLeft: ps ? `4px solid ${ps.border}` : '4px solid #E5E7EB',
+                        background: ps ? ps.bg : '#fff',
                       }}>
-                      <td style={{ width:4, padding:0 }} />
-                      <td style={{ padding:'10px 12px', fontFamily:'monospace', fontSize:11, color:'#6B7280', whiteSpace:'nowrap' }}>{inv.invoice_number}</td>
                       <td style={{ padding:'10px 12px', whiteSpace:'nowrap' }}>
+                        {p.tier && (
+                          <span style={{
+                            display:'inline-block', padding:'2px 7px', borderRadius:9999, fontSize:11, fontWeight:700,
+                            background: ps.bg, color: ps.color, border:`1px solid ${ps.border}`
+                          }}>{p.tier}</span>
+                        )}
+                      </td>
+                      <td style={{ padding:'10px 12px', fontFamily:'monospace', fontSize:11, color:'#6B7280', whiteSpace:'nowrap' }}>{inv.invoice_number}</td>
+                      <td style={{ padding:'10px 12px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
                           <AvatarChip name={inv.customer_name} />
-                          <span style={{ fontWeight:500, color:'#111827' }}>{inv.customer_name}</span>
+                          <div>
+                            <div style={{ fontWeight:500, color:'#111827', whiteSpace:'nowrap' }}>{inv.customer_name}</div>
+                            {p.recommended_action && inv.status !== 'paid' && (
+                              <div style={{ fontSize:10, color: ps?.color || '#9CA3AF', marginTop:1, maxWidth:220, lineHeight:1.3 }}>{p.recommended_action}</div>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td style={{ padding:'10px 12px', fontWeight:600, color:'#111827', whiteSpace:'nowrap' }}>{fmt$(inv.amount)}</td>
                       <td style={{ padding:'10px 12px', color:'#6B7280', whiteSpace:'nowrap' }}>{fmtDate(inv.due_date)}</td>
                       <td style={{ padding:'10px 12px', whiteSpace:'nowrap' }}>
                         {inv.days_past_due > 0
-                          ? <span style={{ fontWeight:700, color: ss?.txt }}>{inv.days_past_due}d</span>
+                          ? <span style={{ fontWeight:700, color: ps?.color }}>{inv.days_past_due}d</span>
                           : <span style={{ color:'#10B981', fontSize:11 }}>On time</span>}
                       </td>
                       <td style={{ padding:'10px 12px' }}>
@@ -818,6 +834,17 @@ function CustomerIntelView({ toast, openDrawer, closeDrawer }) {
                   </div>
                 </div>
                 <div style={{ fontSize:11, color:'#9CA3AF', fontStyle:'italic', lineHeight:1.4, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>{c.grade_reason}</div>
+                {(c.risk_factors || []).length > 0 && (
+                  <div style={{ marginTop:8, borderTop:'1px solid #F3F4F6', paddingTop:6 }}>
+                    <div style={{ fontSize:10, textTransform:'uppercase', letterSpacing:'0.05em', color:'#9CA3AF', marginBottom:4 }}>Risk factors</div>
+                    {(c.risk_factors || []).map((f, i) => (
+                      <div key={i} style={{ fontSize:11, color:'#374151', display:'flex', gap:4, alignItems:'flex-start', marginBottom:2 }}>
+                        <span style={{ color: f.startsWith('Pays avg') || f.includes('%') && !f.includes('late') ? '#059669' : '#EA580C', flexShrink:0 }}>•</span>
+                        <span>{f}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* MIDDLE */}
@@ -1332,8 +1359,22 @@ function InvoiceDrawer({ invoiceId, invoices, onClose, openDrawer, toast, onMuta
   }
 
   const dpd = inv.days_past_due;
-  const riskLabel = dpd >= 60 ? 'Critical' : dpd >= 30 ? 'High' : dpd > 0 ? 'Medium' : 'Low';
   const dpdColor  = dpd >= 60 ? '#E24B4A' : dpd >= 30 ? '#D97706' : '#1D9E75';
+  const prio = data.priority || {};
+  const ps = prio.tier ? PRIORITY_STYLES[prio.tier] : null;
+  const riskFactors = data.risk_factors || [];
+
+  function openPaymentForm() {
+    openDrawer(
+      <div>
+        <div style={{ padding:'16px 20px', borderBottom:'1px solid #E2E8F0', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <div style={{ fontWeight:600 }}>Record payment received</div>
+          <button onClick={onClose} style={{ padding:'4px 10px', border:'1px solid #E2E8F0', borderRadius:6, cursor:'pointer', fontSize:12 }}>✕</button>
+        </div>
+        <RecordPaymentForm invoice={inv} onClose={onClose} toast={toast} onMutate={onMutate} />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -1343,19 +1384,42 @@ function InvoiceDrawer({ invoiceId, invoices, onClose, openDrawer, toast, onMuta
           <div style={{ fontSize:22, fontWeight:600, marginTop:2 }}>{fmt$(inv.amount)}</div>
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          {prio.tier && ps && (
+            <span style={{ padding:'2px 8px', borderRadius:9999, fontSize:11, fontWeight:700, background:ps.bg, color:ps.color, border:`1px solid ${ps.border}` }}>
+              {prio.tier} · {prio.label}
+            </span>
+          )}
           <Badge text={inv.status.charAt(0).toUpperCase()+inv.status.slice(1)} color={inv.status==='paid'?'green':inv.status==='overdue'?'red':'blue'} />
           <button onClick={onClose} style={{ padding:'4px 10px', border:'1px solid #E2E8F0', borderRadius:6, cursor:'pointer', fontSize:12 }}>✕</button>
         </div>
       </div>
       <div style={{ padding:'16px 20px' }}>
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
-          {[['Customer',cu.name],['Due date',fmtDate(inv.due_date)],['Days past due', dpd ? `${dpd}d` : 'Current'],['Risk level', riskLabel]].map(([lbl,val],i) => (
+          {[['Customer',cu.name],['Due date',fmtDate(inv.due_date)],['Days past due', dpd ? `${dpd}d` : 'Current'],['Priority', prio.label || '—']].map(([lbl,val],i) => (
             <div key={lbl} style={{ background:'#F9FAFB', borderRadius:8, padding:10 }}>
               <div style={{ fontSize:10, color:'#9CA3AF' }}>{lbl}</div>
-              <div style={{ fontWeight:500, marginTop:2, color: i===2&&dpd>0 ? dpdColor : '#111827' }}>{val}</div>
+              <div style={{ fontWeight:500, marginTop:2, color: i===2&&dpd>0 ? dpdColor : i===3&&ps ? ps.color : '#111827' }}>{val}</div>
             </div>
           ))}
         </div>
+
+        {prio.recommended_action && inv.status !== 'paid' && (
+          <div style={{ background: ps?.bg || '#F9FAFB', border:`1px solid ${ps?.border || '#E2E8F0'}`, borderRadius:8, padding:'8px 12px', marginBottom:10 }}>
+            <div style={{ fontSize:11, fontWeight:600, color: ps?.color || '#374151' }}>Recommended action</div>
+            <div style={{ fontSize:12, color:'#374151', marginTop:3 }}>{prio.recommended_action}</div>
+          </div>
+        )}
+
+        {riskFactors.length > 0 && (
+          <div style={{ background:'#F9FAFB', borderRadius:8, padding:'8px 12px', marginBottom:10 }}>
+            <div style={{ fontSize:11, fontWeight:600, color:'#374151', marginBottom:4 }}>Risk signals</div>
+            {riskFactors.map((f, i) => (
+              <div key={i} style={{ fontSize:11, color:'#6B7280', display:'flex', gap:4, alignItems:'flex-start', marginBottom:2 }}>
+                <span style={{ color:'#EA580C', flexShrink:0 }}>•</span><span>{f}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {ap && <div style={{ background:'#D1FAE5', border:'1px solid #6EE7B7', borderRadius:8, padding:10, marginBottom:10 }}>
           <div style={{ fontSize:11, fontWeight:600, color:'#065F46' }}>⟳ Active promise to pay</div>
@@ -1372,6 +1436,7 @@ function InvoiceDrawer({ invoiceId, invoices, onClose, openDrawer, toast, onMuta
 
         <div style={{ fontSize:11, fontWeight:500, color:'#9CA3AF', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:8 }}>Quick actions</div>
         <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:16 }}>
+          {inv.status !== 'paid' && <button onClick={openPaymentForm} style={{ padding:'5px 10px', background:'#059669', color:'white', border:'none', borderRadius:6, fontSize:12, cursor:'pointer', fontWeight:600 }}>Record Payment</button>}
           {inv.status !== 'paid' && !ap && !ad && <button onClick={openPTPForm} style={{ padding:'5px 10px', border:'1px solid #E2E8F0', borderRadius:6, fontSize:12, cursor:'pointer' }}>Record PTP</button>}
           {inv.status !== 'paid' && !ad && <button onClick={openDisputeForm} style={{ padding:'5px 10px', border:'1px solid #E2E8F0', borderRadius:6, fontSize:12, cursor:'pointer' }}>Open dispute</button>}
           {inv.status !== 'paid' && !ao && <button onClick={openOfferForm} style={{ padding:'5px 10px', background:'#7C3AED', color:'white', border:'none', borderRadius:6, fontSize:12, cursor:'pointer', fontWeight:600 }}>Send offer</button>}
@@ -1472,6 +1537,334 @@ function QuickOfferForm({ invoice, onClose, toast, onMutate }) {
   );
 }
 
+// ── RecordPaymentForm ─────────────────────────────────────────────────────────
+function RecordPaymentForm({ invoice, onClose, toast, onMutate }) {
+  const [amount, setAmount] = useState(invoice.amount);
+  const [method, setMethod] = useState('ach');
+  const [date, setDate]     = useState(todayPlus(0));
+  const [notes, setNotes]   = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function save(e) {
+    e.preventDefault();
+    setLoading(true);
+    const res = await fetch('/api/payments', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ invoice_id: invoice.id, amount: parseFloat(amount), payment_method: method, received_date: date, notes }),
+    });
+    if (!res.ok) { toast((await res.json()).error || 'Failed', 'error'); setLoading(false); return; }
+    const full = parseFloat(amount) >= invoice.amount;
+    toast(full ? `Payment recorded — ${invoice.invoice_number} marked paid!` : 'Partial payment recorded');
+    onClose(); onMutate();
+  }
+
+  return (
+    <form onSubmit={save} style={{ padding:20 }}>
+      <div style={{ background:'#F9FAFB', borderRadius:8, padding:'8px 12px', marginBottom:14, fontSize:13 }}>
+        <strong>{invoice.customer_name}</strong> · {invoice.invoice_number} · Outstanding {fmt$(invoice.amount)}
+      </div>
+      <Field label="Amount received">
+        <input type="number" step="0.01" min="0.01" value={amount} onChange={e => setAmount(e.target.value)} style={fieldStyle} required />
+      </Field>
+      <Field label="Payment method">
+        <select value={method} onChange={e => setMethod(e.target.value)} style={fieldStyle}>
+          {['ach','wire','check','card','cash'].map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
+        </select>
+      </Field>
+      <Field label="Received date">
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} style={fieldStyle} required />
+      </Field>
+      <Field label="Notes">
+        <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Ref # or memo…" style={fieldStyle} />
+      </Field>
+      {parseFloat(amount) >= invoice.amount && (
+        <div style={{ background:'#D1FAE5', border:'1px solid #6EE7B7', borderRadius:8, padding:'8px 12px', fontSize:12, marginBottom:12 }}>
+          Full payment — invoice will be marked <strong>Paid</strong>
+        </div>
+      )}
+      <button type="submit" disabled={loading} style={{ width:'100%', padding:10, background:'#059669', color:'#fff', border:'none', borderRadius:8, fontSize:13, fontWeight:600, cursor:'pointer' }}>
+        {loading ? 'Recording…' : 'Record payment'}
+      </button>
+    </form>
+  );
+}
+
+// ── DunningView ───────────────────────────────────────────────────────────────
+const DUNNING_STEP_LABELS = {
+  invoice_issued:    { label:'Invoice Issued',     timing:'Day 0' },
+  pre_due_reminder:  { label:'Pre-Due Reminder',   timing:'−7 days' },
+  due_date_notice:   { label:'Due Date Notice',    timing:'Due date' },
+  first_overdue:     { label:'1st Overdue',        timing:'+7 DPD' },
+  escalated_notice:  { label:'Escalated Notice',   timing:'+21 DPD' },
+  senior_outreach:   { label:'Senior Outreach',    timing:'+45 DPD' },
+  legal_flag:        { label:'Legal Flag',         timing:'+90 DPD' },
+  completed:         { label:'Completed',          timing:'—' },
+};
+const STEP_ORDER = ['invoice_issued','pre_due_reminder','due_date_notice','first_overdue','escalated_notice','senior_outreach','legal_flag'];
+
+function DunningView({ toast, onMutate }) {
+  const [seqs, setSeqs] = useState(null);
+  const [filter, setFilter] = useState('all');
+
+  const load = useCallback(async () => {
+    setSeqs(await fetch('/api/dunning').then(r => r.json()));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  async function advance(invoiceId) {
+    await fetch(`/api/dunning/${invoiceId}/advance`, { method:'POST' });
+    toast('Dunning advanced'); load(); onMutate();
+  }
+
+  const filtered = (seqs || []).filter(s => {
+    if (filter === 'active')     return s.status === 'active' && !s.suppressed_by;
+    if (filter === 'suppressed') return s.suppressed_by && s.invoice_status !== 'paid';
+    if (filter === 'completed')  return s.invoice_status === 'paid' || s.status === 'completed';
+    return true;
+  });
+
+  const suppressLabel = { dispute:'Dispute open', ptp:'PTP active', offer:'Offer active', paid:'Invoice paid' };
+  const suppressColor = { dispute:'#D97706', ptp:'#059669', offer:'#7C3AED', paid:'#9CA3AF' };
+
+  return (
+    <div>
+      <div style={{ background:'#fff', borderRadius:12, border:'1px solid #E2E8F0', padding:20, marginBottom:16 }}>
+        <div style={{ fontWeight:700, color:'#1A3C5E', fontSize:14, marginBottom:4 }}>Dunning Sequences</div>
+        <div style={{ fontSize:12, color:'#9CA3AF' }}>Track and manage automated outreach for every open invoice</div>
+        {seqs && (
+          <div style={{ display:'flex', gap:16, marginTop:12 }}>
+            {[
+              { label:'Active', val: seqs.filter(s => s.status === 'active' && !s.suppressed_by && s.invoice_status !== 'paid').length, color:'#1A3C5E' },
+              { label:'Suppressed', val: seqs.filter(s => s.suppressed_by && s.invoice_status !== 'paid').length, color:'#D97706' },
+              { label:'Completed', val: seqs.filter(s => s.invoice_status === 'paid').length, color:'#059669' },
+            ].map(m => (
+              <div key={m.label} style={{ background:'#F9FAFB', borderRadius:8, padding:'8px 14px' }}>
+                <div style={{ fontSize:10, color:'#9CA3AF', textTransform:'uppercase' }}>{m.label}</div>
+                <div style={{ fontSize:20, fontWeight:700, color:m.color }}>{m.val}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+        {[['all','All'],['active','Active'],['suppressed','Suppressed'],['completed','Completed']].map(([id,lbl]) => (
+          <button key={id} onClick={() => setFilter(id)} style={{
+            padding:'4px 12px', borderRadius:9999, fontSize:11, fontWeight:600, cursor:'pointer',
+            border:`1px solid ${filter===id?'#1A3C5E':'#E2E8F0'}`,
+            background:filter===id?'#1A3C5E':'#fff', color:filter===id?'#fff':'#6B7280',
+          }}>{lbl}</button>
+        ))}
+      </div>
+
+      {!seqs && <div style={{ textAlign:'center', padding:40, color:'#9CA3AF' }}>Loading…</div>}
+      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+        {filtered.map(s => {
+          const currentIdx = STEP_ORDER.indexOf(s.expected_step);
+          const isDone = s.invoice_status === 'paid';
+          return (
+            <div key={s.id} style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:16, opacity: isDone ? 0.65 : 1 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
+                <div>
+                  <div style={{ fontWeight:600, fontSize:13, color:'#111827' }}>{s.customer_name}</div>
+                  <div style={{ fontFamily:'monospace', fontSize:11, color:'#9CA3AF' }}>{s.invoice_number} · {fmt$(s.amount)}</div>
+                </div>
+                <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                  {s.suppressed_by && (
+                    <span style={{ fontSize:11, fontWeight:600, padding:'2px 8px', borderRadius:9999, background:'#FFF7ED', color: suppressColor[s.suppressed_by] || '#D97706' }}>
+                      ⏸ {suppressLabel[s.suppressed_by] || 'Suppressed'}
+                    </span>
+                  )}
+                  {!s.suppressed_by && !isDone && s.days_past_due > 0 && (
+                    <span style={{ fontSize:11, color:'#DC2626', fontWeight:600 }}>{s.days_past_due}d overdue</span>
+                  )}
+                  {isDone && <Badge text="Paid" color="green" />}
+                </div>
+              </div>
+
+              {/* Dunning timeline */}
+              <div style={{ display:'flex', gap:0, alignItems:'center', overflowX:'auto', paddingBottom:4 }}>
+                {STEP_ORDER.map((step, i) => {
+                  const isActive  = step === s.expected_step;
+                  const isPast    = i < currentIdx;
+                  const stepMeta  = DUNNING_STEP_LABELS[step];
+                  const dotColor  = isDone ? '#9CA3AF' : isActive ? '#1A3C5E' : isPast ? '#059669' : '#E2E8F0';
+                  const lineColor = isPast || (isDone && i < STEP_ORDER.length - 1) ? '#059669' : '#E2E8F0';
+                  return (
+                    <React.Fragment key={step}>
+                      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', minWidth:64 }}>
+                        <div style={{ width:14, height:14, borderRadius:'50%', background: dotColor, border:`2px solid ${dotColor}`, marginBottom:4 }} />
+                        <div style={{ fontSize:9, color: isActive ? '#1A3C5E' : '#9CA3AF', fontWeight: isActive ? 700 : 400, textAlign:'center', lineHeight:1.2 }}>{stepMeta.label}</div>
+                        <div style={{ fontSize:9, color:'#C4C9D4' }}>{stepMeta.timing}</div>
+                      </div>
+                      {i < STEP_ORDER.length - 1 && (
+                        <div style={{ flex:1, height:2, background:lineColor, minWidth:8, marginTop:-24 }} />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+
+              {!s.suppressed_by && !isDone && (
+                <div style={{ marginTop:10, display:'flex', gap:8 }}>
+                  <button onClick={() => advance(s.invoice_id)} style={{
+                    padding:'4px 12px', background:'#1A3C5E', color:'#fff', border:'none',
+                    borderRadius:6, fontSize:11, fontWeight:600, cursor:'pointer'
+                  }}>
+                    Advance → {DUNNING_STEP_LABELS[STEP_ORDER[Math.min(STEP_ORDER.indexOf(s.expected_step) + 1, STEP_ORDER.length - 1)]]?.label}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {seqs && filtered.length === 0 && <div style={{ textAlign:'center', padding:40, color:'#9CA3AF' }}>No invoices match this filter.</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── ControllerView ────────────────────────────────────────────────────────────
+function ControllerView() {
+  const [dash, setDash] = useState(null);
+
+  const load = useCallback(async () => {
+    setDash(await fetch('/api/controller/dashboard').then(r => r.json()));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  if (!dash) return <div style={{ textAlign:'center', padding:60, color:'#9CA3AF' }}>Loading…</div>;
+
+  const { active_ptps, funnel, funnel_amounts, dso_trend, cash_forecast, aging } = dash;
+  const totalOpen = Object.values(aging).reduce((s, v) => s + v, 0);
+
+  const FUNNEL_LABELS = {
+    P1: { label:'Critical', color:'#DC2626', bg:'#FEF2F2' },
+    P2: { label:'High',     color:'#EA580C', bg:'#FFF7ED' },
+    P3: { label:'Medium',   color:'#D97706', bg:'#FFFBEB' },
+    P4: { label:'Low',      color:'#16A34A', bg:'#F0FDF4' },
+    P5: { label:'Watch',    color:'#7C3AED', bg:'#F5F3FF' },
+    P6: { label:'Suppress', color:'#9CA3AF', bg:'#F9FAFB' },
+  };
+
+  const committedTotal = active_ptps.reduce((s, p) => s + p.promised_amount, 0);
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+      {/* KPI row */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
+        {[
+          { label:'Committed (PTPs)', val: fmt$(committedTotal), sub:`${active_ptps.length} active promises`, color:'#059669' },
+          { label:'30-Day Cash — Likely', val: fmt$(cash_forecast.likely), sub:'easy/moderate, <15 DPD', color:'#1A3C5E' },
+          { label:'At Risk', val: fmt$(cash_forecast.at_risk), sub:'medium grade / 15–45 DPD', color:'#D97706' },
+          { label:'Total Open AR', val: fmt$(totalOpen), sub:'all open invoices', color:'#DC2626' },
+        ].map(m => (
+          <div key={m.label} style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:'14px 16px' }}>
+            <div style={{ fontSize:10, color:'#9CA3AF', textTransform:'uppercase', letterSpacing:'0.06em' }}>{m.label}</div>
+            <div style={{ fontSize:22, fontWeight:700, color:m.color, marginTop:4 }}>{m.val}</div>
+            <div style={{ fontSize:11, color:'#9CA3AF', marginTop:2 }}>{m.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+        {/* Collection funnel */}
+        <div style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:16 }}>
+          <div style={{ fontWeight:700, color:'#1A3C5E', fontSize:13, marginBottom:12 }}>Collection Funnel by Priority</div>
+          {Object.entries(FUNNEL_LABELS).map(([tier, meta]) => {
+            const count = funnel[tier] || 0;
+            const amt   = funnel_amounts[tier] || 0;
+            const pct   = count > 0 && totalOpen > 0 ? (amt / totalOpen * 100) : 0;
+            return (
+              <div key={tier} style={{ marginBottom:8 }}>
+                <div style={{ display:'flex', justifyContent:'space-between', marginBottom:3 }}>
+                  <span style={{ fontSize:12, color: meta.color, fontWeight:600 }}>{tier} {meta.label}</span>
+                  <span style={{ fontSize:11, color:'#6B7280' }}>{count} inv · {fmt$(amt)}</span>
+                </div>
+                <div style={{ height:6, borderRadius:3, background:'#F3F4F6' }}>
+                  <div style={{ height:'100%', borderRadius:3, background:meta.color, width:`${Math.min(pct, 100)}%`, transition:'width 0.4s' }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Aging buckets */}
+        <div style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:16 }}>
+          <div style={{ fontWeight:700, color:'#1A3C5E', fontSize:13, marginBottom:12 }}>AR Aging Buckets</div>
+          {[
+            { key:'current',   label:'Current',     color:'#059669' },
+            { key:'dpd_1_30',  label:'1–30 DPD',    color:'#1A3C5E' },
+            { key:'dpd_31_60', label:'31–60 DPD',   color:'#D97706' },
+            { key:'dpd_61_90', label:'61–90 DPD',   color:'#EA580C' },
+            { key:'dpd_90plus',label:'90+ DPD',     color:'#DC2626' },
+          ].map(b => {
+            const amt = aging[b.key] || 0;
+            const pct = totalOpen > 0 ? (amt / totalOpen * 100) : 0;
+            return (
+              <div key={b.key} style={{ marginBottom:8 }}>
+                <div style={{ display:'flex', justifyContent:'space-between', marginBottom:3 }}>
+                  <span style={{ fontSize:12, color: b.color, fontWeight:600 }}>{b.label}</span>
+                  <span style={{ fontSize:11, color:'#6B7280' }}>{fmt$(amt)} ({Math.round(pct)}%)</span>
+                </div>
+                <div style={{ height:6, borderRadius:3, background:'#F3F4F6' }}>
+                  <div style={{ height:'100%', borderRadius:3, background:b.color, width:`${Math.min(pct, 100)}%`, transition:'width 0.4s' }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* DSO trend */}
+      {dso_trend.length > 0 && (
+        <div style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:16 }}>
+          <div style={{ fontWeight:700, color:'#1A3C5E', fontSize:13, marginBottom:12 }}>DSO Trend — Avg Days to Pay</div>
+          <div style={{ display:'flex', gap:8, alignItems:'flex-end', height:80 }}>
+            {dso_trend.map(m => {
+              const h = Math.min((m.avg_dtp / 70) * 100, 100);
+              const c = m.avg_dtp > 45 ? '#DC2626' : m.avg_dtp > 30 ? '#D97706' : '#059669';
+              return (
+                <div key={m.month} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', gap:3 }}>
+                  <div style={{ fontSize:10, color: c, fontWeight:600 }}>{Math.round(m.avg_dtp)}d</div>
+                  <div style={{ width:'100%', background: c, borderRadius:'3px 3px 0 0', height:`${h}%`, minHeight:4, transition:'height 0.4s' }} />
+                  <div style={{ fontSize:9, color:'#9CA3AF' }}>{m.month?.slice(5)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Active PTPs */}
+      {active_ptps.length > 0 && (
+        <div style={{ background:'#fff', border:'1px solid #E2E8F0', borderRadius:10, padding:16 }}>
+          <div style={{ fontWeight:700, color:'#1A3C5E', fontSize:13, marginBottom:12 }}>Active Promises to Pay</div>
+          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+            <thead>
+              <tr style={{ background:'#F9FAFB' }}>
+                {['Customer','Invoice','Promised Amount','Promise Date'].map(h => (
+                  <th key={h} style={{ padding:'7px 10px', textAlign:'left', color:'#6B7280', fontSize:10, textTransform:'uppercase', fontWeight:600 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {active_ptps.map(p => (
+                <tr key={p.id} style={{ borderBottom:'1px solid #F3F4F6' }}>
+                  <td style={{ padding:'8px 10px', fontWeight:500 }}>{p.customer_name}</td>
+                  <td style={{ padding:'8px 10px', fontFamily:'monospace', color:'#6B7280', fontSize:11 }}>{p.invoice_number}</td>
+                  <td style={{ padding:'8px 10px', fontWeight:700, color:'#059669' }}>{fmt$(p.promised_amount)}</td>
+                  <td style={{ padding:'8px 10px', color:'#374151' }}>{fmtDate(p.promise_date)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [view, setView]       = useState('workqueue');
@@ -1513,15 +1906,17 @@ export default function App() {
 
   function renderView() {
     switch (view) {
-      case 'workqueue': return <WorkqueueView invoices={invoices} onSendOffer={handleSendOffer} onWithdraw={handleWithdraw} onRowClick={openInvoiceDrawer} stats={stats} />;
-      case 'invoices':  return <InvoicesView invoices={invoices} onRowClick={openInvoiceDrawer} />;
-      case 'disputes':  return <DisputesView invoices={invoices} {...sharedProps} />;
-      case 'promises':  return <PromisesView {...sharedProps} />;
-      case 'intel':     return <CustomerIntelView {...sharedProps} />;
-      case 'offers':    return <OffersView {...sharedProps} />;
-      case 'smart':     return <SmartOffersView {...sharedProps} />;
-      case 'buyer':     return <BuyerPortalView {...sharedProps} />;
-      default:          return null;
+      case 'workqueue':   return <WorkqueueView invoices={invoices} onSendOffer={handleSendOffer} onWithdraw={handleWithdraw} onRowClick={openInvoiceDrawer} stats={stats} />;
+      case 'invoices':    return <InvoicesView invoices={invoices} onRowClick={openInvoiceDrawer} />;
+      case 'disputes':    return <DisputesView invoices={invoices} {...sharedProps} />;
+      case 'promises':    return <PromisesView {...sharedProps} />;
+      case 'dunning':     return <DunningView {...sharedProps} />;
+      case 'intel':       return <CustomerIntelView {...sharedProps} />;
+      case 'controller':  return <ControllerView />;
+      case 'offers':      return <OffersView {...sharedProps} />;
+      case 'smart':       return <SmartOffersView {...sharedProps} />;
+      case 'buyer':       return <BuyerPortalView {...sharedProps} />;
+      default:            return null;
     }
   }
 

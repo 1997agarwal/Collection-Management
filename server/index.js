@@ -1,15 +1,15 @@
 const express = require('express');
 const cors = require('cors');
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
-const db = new Database(path.join(dataDir, 'clearar.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = new DatabaseSync(path.join(dataDir, 'clearar.db'));
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 db.exec(`
@@ -124,6 +124,114 @@ db.exec(`
     responded_at TEXT
   );
 `);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS dunning_sequences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id INTEGER UNIQUE REFERENCES invoices(id),
+    current_step TEXT DEFAULT 'invoice_issued',
+    status TEXT DEFAULT 'active',
+    paused_reason TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS payments_received (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id INTEGER REFERENCES invoices(id),
+    customer_id INTEGER REFERENCES customers(id),
+    amount REAL NOT NULL,
+    payment_method TEXT DEFAULT 'ach',
+    received_date TEXT NOT NULL,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// ── Priority & Risk Helpers ───────────────────────────────────────────────────
+function stepFromDPD(dpd, status) {
+  if (status === 'paid') return 'completed';
+  if (dpd >= 90) return 'legal_flag';
+  if (dpd >= 45) return 'senior_outreach';
+  if (dpd >= 21) return 'escalated_notice';
+  if (dpd >= 7)  return 'first_overdue';
+  if (dpd >= 0)  return 'due_date_notice';
+  if (dpd >= -7) return 'pre_due_reminder';
+  return 'invoice_issued';
+}
+
+function computePriority(inv, profile, hasActivePTP, hasActiveDispute, hasActiveOffer) {
+  if (inv.status === 'paid') {
+    return { tier: null, label: 'Paid', color: '#059669', bg: '#F0FDF4', recommended_action: 'Invoice settled.' };
+  }
+  if (hasActivePTP || hasActiveDispute || hasActiveOffer) {
+    const reason = hasActiveDispute ? 'active dispute' : hasActivePTP ? 'active PTP' : 'offer in checkout';
+    return { tier: 'P6', label: 'Suppress', color: '#9CA3AF', bg: '#F9FAFB',
+      recommended_action: `System handling — ${reason}. No duplicate outreach.` };
+  }
+  const dpd = inv.days_past_due || 0;
+  const amount = inv.amount || 0;
+  const grade = profile?.collection_grade || 'medium';
+  const brokenPTPs = profile?.broken_ptp_count || 0;
+
+  if (dpd >= 60 || (dpd >= 45 && amount > 10000)) {
+    return { tier: 'P1', label: 'Critical', color: '#DC2626', bg: '#FEF2F2',
+      recommended_action: brokenPTPs > 0
+        ? `Personal call required — ${brokenPTPs} broken PTP${brokenPTPs > 1 ? 's' : ''} on file. Do not send discount offer.`
+        : `Personal call required — escalate if no response in 48h. Consider ${amount > 15000 ? '2.5%' : '2%'} offer.` };
+  }
+  if (dpd >= 30) {
+    return { tier: 'P2', label: 'High', color: '#EA580C', bg: '#FFF7ED',
+      recommended_action: 'Firm dunning email · Offer 1.5% early payment discount · Create collector task' };
+  }
+  if (dpd >= 15) {
+    return { tier: 'P3', label: 'Medium', color: '#D97706', bg: '#FFFBEB',
+      recommended_action: 'Automated reminder email · Monitor for response' };
+  }
+  if (dpd >= 1) {
+    return { tier: 'P4', label: 'Low', color: '#16A34A', bg: '#F0FDF4',
+      recommended_action: 'Standard follow-up · No escalation needed' };
+  }
+  if (grade === 'risky' || grade === 'high_risk' || brokenPTPs > 0) {
+    return { tier: 'P5', label: 'Watch', color: '#7C3AED', bg: '#F5F3FF',
+      recommended_action: `Flag for early attention — ${grade === 'risky' ? 'risky payment history' : brokenPTPs > 0 ? `${brokenPTPs} broken promise${brokenPTPs > 1 ? 's' : ''} on file` : 'high risk grade'}.` };
+  }
+  return { tier: 'P4', label: 'Low', color: '#16A34A', bg: '#F0FDF4',
+    recommended_action: grade === 'easy'
+      ? 'Easy payer — optional proactive offer. No manual action needed.'
+      : 'Not yet due. Pre-due reminder sufficient.' };
+}
+
+function computeRiskFactors(profile) {
+  if (!profile) return [];
+  const factors = [];
+  if (profile.avg_days_to_pay > 45) {
+    factors.push({ score: profile.avg_days_to_pay, text: `Avg payment ${Math.round(profile.avg_days_to_pay)}d — ${Math.round(profile.avg_days_to_pay - 30)}d over terms` });
+  } else if (profile.avg_days_to_pay > 30) {
+    factors.push({ score: profile.avg_days_to_pay * 0.6, text: `Avg payment ${Math.round(profile.avg_days_to_pay)}d — occasionally late` });
+  }
+  if (profile.broken_ptp_count > 0) {
+    factors.push({ score: profile.broken_ptp_count * 30, text: `${profile.broken_ptp_count} broken payment promise${profile.broken_ptp_count > 1 ? 's' : ''} on record` });
+  }
+  if (profile.late_payment_rate > 0.5) {
+    factors.push({ score: profile.late_payment_rate * 80, text: `${Math.round(profile.late_payment_rate * 100)}% of invoices paid late` });
+  } else if (profile.late_payment_rate > 0.25) {
+    factors.push({ score: profile.late_payment_rate * 55, text: `${Math.round(profile.late_payment_rate * 100)}% late payment rate` });
+  }
+  if (profile.dispute_count > 1) {
+    factors.push({ score: profile.dispute_count * 12, text: `${profile.dispute_count} disputes on file` });
+  }
+  if (profile.on_time_rate < 0.5) {
+    factors.push({ score: (1 - profile.on_time_rate) * 50, text: `Only ${Math.round(profile.on_time_rate * 100)}% on-time payment rate` });
+  }
+  if (factors.length === 0) {
+    if (profile.avg_days_to_pay <= 10) factors.push({ score: -40, text: `Pays avg ${Math.round(profile.avg_days_to_pay)}d — well within terms` });
+    if (profile.on_time_rate >= 0.85) factors.push({ score: -30, text: `${Math.round(profile.on_time_rate * 100)}% on-time payment rate` });
+    if (profile.broken_ptp_count === 0 && profile.dispute_count === 0) factors.push({ score: -20, text: 'Zero broken promises or disputes on file' });
+    if (profile.early_payment_rate > 0.3) factors.push({ score: -15, text: `${Math.round(profile.early_payment_rate * 100)}% historical early payment rate` });
+  }
+  factors.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+  return factors.slice(0, 3).map(f => f.text);
+}
 
 // ── Seed original tables ──────────────────────────────────────────────────────
 function seedIfEmpty() {
@@ -289,17 +397,36 @@ app.use(express.json());
 // ── EXISTING ROUTES (unchanged) ───────────────────────────────────────────────
 
 app.get('/api/invoices', (req, res) => {
-  const invoices = db.prepare(`
+  const rows = db.prepare(`
     SELECT i.*, c.name AS customer_name, c.email AS customer_email, c.avg_days_to_pay,
       d.id AS offer_id, d.discount_pct AS offer_pct,
       d.discount_amount AS offer_discount_amount, d.discounted_amount AS offer_discounted_amount,
       d.expiry_date AS offer_expiry, d.status AS offer_status,
-      d.accepted_at AS offer_accepted_at, d.created_at AS offer_created_at
+      d.accepted_at AS offer_accepted_at, d.created_at AS offer_created_at,
+      cp.collection_grade, cp.broken_ptp_count, cp.dispute_count, cp.on_time_rate,
+      cp.avg_days_to_pay AS cp_avg_days, cp.late_payment_rate, cp.early_payment_rate,
+      CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_active_ptp,
+      CASE WHEN disp.id IS NOT NULL THEN 1 ELSE 0 END AS has_active_dispute
     FROM invoices i
     JOIN customers c ON c.id = i.customer_id
     LEFT JOIN discount_offers d ON d.invoice_id = i.id AND d.status IN ('active','accepted')
+    LEFT JOIN customer_profiles cp ON cp.customer_id = i.customer_id
+    LEFT JOIN promises_to_pay p ON p.invoice_id = i.id AND p.status = 'active'
+    LEFT JOIN disputes disp ON disp.invoice_id = i.id AND disp.status IN ('open','under_review')
     ORDER BY i.days_past_due DESC
   `).all();
+
+  const invoices = rows.map(inv => {
+    const profile = {
+      collection_grade: inv.collection_grade, broken_ptp_count: inv.broken_ptp_count || 0,
+      avg_days_to_pay: inv.cp_avg_days || inv.avg_days_to_pay,
+      late_payment_rate: inv.late_payment_rate || 0.3, on_time_rate: inv.on_time_rate || 0.5,
+      early_payment_rate: inv.early_payment_rate || 0.1, dispute_count: inv.dispute_count || 0,
+    };
+    const priority = computePriority(inv, profile, inv.has_active_ptp === 1, inv.has_active_dispute === 1, inv.offer_status === 'active');
+    return { ...inv, priority };
+  });
+
   res.json(invoices);
 });
 
@@ -377,8 +504,11 @@ app.get('/api/invoices/:id', (req, res) => {
   const open_dispute = db.prepare("SELECT * FROM disputes WHERE invoice_id=? AND status IN ('open','under_review')").get(inv.id);
   const activity = db.prepare("SELECT * FROM activity_log WHERE invoice_id=? ORDER BY id DESC LIMIT 10").all(inv.id);
   const customer = { id: inv.customer_id, name: inv.customer_name, email: inv.customer_email };
+  const profile = db.prepare('SELECT * FROM customer_profiles WHERE customer_id=?').get(inv.customer_id);
+  const priority = computePriority(inv, profile, !!active_ptp, !!open_dispute, !!active_offer);
+  const risk_factors = computeRiskFactors(profile);
 
-  res.json({ ...inv, customer, active_offer, active_ptp, open_dispute, activity });
+  res.json({ ...inv, customer, active_offer, active_ptp, open_dispute, activity, priority, risk_factors });
 });
 
 // Disputes
@@ -520,7 +650,7 @@ app.get('/api/customers/intelligence', (req, res) => {
       "SELECT COUNT(*) AS c FROM invoices WHERE customer_id=? AND status!='paid'"
     ).get(p.customer_id).c;
 
-    return { ...p, payment_trend, next_expected_payment, open_invoice_count };
+    return { ...p, payment_trend, next_expected_payment, open_invoice_count, risk_factors: computeRiskFactors(p) };
   });
 
   res.json(result);
@@ -609,6 +739,145 @@ app.patch('/api/liquidity/campaigns/:id/respond', (req, res) => {
   }
 
   res.json(db.prepare('SELECT * FROM liquidity_campaigns WHERE id=?').get(campaign.id));
+});
+
+// ── Dunning seeding ───────────────────────────────────────────────────────────
+const DUNNING_STEPS = ['invoice_issued','pre_due_reminder','due_date_notice','first_overdue','escalated_notice','senior_outreach','legal_flag'];
+
+function seedDunningSequences() {
+  const count = db.prepare('SELECT COUNT(*) as c FROM dunning_sequences').get().c;
+  if (count > 0) return;
+  const all = db.prepare('SELECT id, days_past_due, status FROM invoices').all();
+  const ins = db.prepare('INSERT OR IGNORE INTO dunning_sequences (invoice_id, current_step, status) VALUES (?,?,?)');
+  for (const inv of all) {
+    ins.run(inv.id, stepFromDPD(inv.days_past_due, inv.status), inv.status === 'paid' ? 'completed' : 'active');
+  }
+}
+seedDunningSequences();
+
+// GET /api/dunning
+app.get('/api/dunning', (req, res) => {
+  const seqs = db.prepare(`
+    SELECT ds.*, i.invoice_number, i.amount, i.due_date, i.days_past_due, i.status AS invoice_status,
+      c.name AS customer_name, c.id AS customer_id
+    FROM dunning_sequences ds
+    JOIN invoices i ON i.id = ds.invoice_id
+    JOIN customers c ON c.id = i.customer_id
+    ORDER BY i.days_past_due DESC
+  `).all();
+
+  const result = seqs.map(s => {
+    const activeOffer   = db.prepare("SELECT id FROM discount_offers WHERE invoice_id=? AND status='active'").get(s.invoice_id);
+    const activePTP     = db.prepare("SELECT id FROM promises_to_pay WHERE invoice_id=? AND status='active'").get(s.invoice_id);
+    const activeDispute = db.prepare("SELECT id FROM disputes WHERE invoice_id=? AND status IN ('open','under_review')").get(s.invoice_id);
+    let suppressed_by = null;
+    if (s.invoice_status === 'paid')   suppressed_by = 'paid';
+    else if (activeDispute)            suppressed_by = 'dispute';
+    else if (activePTP)                suppressed_by = 'ptp';
+    else if (activeOffer)              suppressed_by = 'offer';
+    return { ...s, suppressed_by, expected_step: stepFromDPD(s.days_past_due, s.invoice_status) };
+  });
+
+  res.json(result);
+});
+
+// POST /api/dunning/:invoiceId/advance
+app.post('/api/dunning/:invoiceId/advance', (req, res) => {
+  const seq = db.prepare('SELECT * FROM dunning_sequences WHERE invoice_id=?').get(req.params.invoiceId);
+  if (!seq) return res.status(404).json({ error: 'Not found' });
+  const idx = DUNNING_STEPS.indexOf(seq.current_step);
+  const next = DUNNING_STEPS[Math.min(idx + 1, DUNNING_STEPS.length - 1)];
+  db.prepare("UPDATE dunning_sequences SET current_step=?, status='active', paused_reason=NULL, updated_at=datetime('now') WHERE invoice_id=?").run(next, req.params.invoiceId);
+  db.prepare("INSERT INTO activity_log (invoice_id, message, type) VALUES (?,?,'dunning')").run(req.params.invoiceId, `Dunning advanced to: ${next.replace(/_/g, ' ')}`);
+  res.json(db.prepare('SELECT * FROM dunning_sequences WHERE invoice_id=?').get(req.params.invoiceId));
+});
+
+// PATCH /api/dunning/:invoiceId/pause
+app.patch('/api/dunning/:invoiceId/pause', (req, res) => {
+  const { paused_reason } = req.body;
+  db.prepare("UPDATE dunning_sequences SET status='paused', paused_reason=?, updated_at=datetime('now') WHERE invoice_id=?").run(paused_reason || 'Manually paused', req.params.invoiceId);
+  res.json(db.prepare('SELECT * FROM dunning_sequences WHERE invoice_id=?').get(req.params.invoiceId));
+});
+
+// POST /api/payments
+app.post('/api/payments', (req, res) => {
+  const { invoice_id, amount, payment_method, received_date, notes } = req.body;
+  if (!invoice_id || !amount || !received_date)
+    return res.status(400).json({ error: 'invoice_id, amount and received_date are required' });
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id=?').get(invoice_id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+  const result = db.prepare(
+    'INSERT INTO payments_received (invoice_id, customer_id, amount, payment_method, received_date, notes) VALUES (?,?,?,?,?,?)'
+  ).run(invoice_id, invoice.customer_id, amount, payment_method || 'ach', received_date, notes || '');
+
+  if (amount >= invoice.amount) {
+    db.prepare("UPDATE invoices SET status='paid' WHERE id=?").run(invoice_id);
+    db.prepare("UPDATE dunning_sequences SET status='completed', updated_at=datetime('now') WHERE invoice_id=?").run(invoice_id);
+    db.prepare("INSERT INTO activity_log (invoice_id, message, type) VALUES (?,?,'payment')").run(invoice_id, `Payment received in full — ${(payment_method || 'ACH').toUpperCase()} · ${received_date}`);
+  } else {
+    db.prepare("INSERT INTO activity_log (invoice_id, message, type) VALUES (?,?,'payment')").run(invoice_id, `Partial payment received — $${Math.round(amount).toLocaleString()} of $${Math.round(invoice.amount).toLocaleString()}`);
+  }
+
+  res.status(201).json(db.prepare('SELECT * FROM payments_received WHERE id=?').get(result.lastInsertRowid));
+});
+
+// GET /api/controller/dashboard
+app.get('/api/controller/dashboard', (req, res) => {
+  const active_ptps = db.prepare(`
+    SELECT p.*, c.name AS customer_name, i.invoice_number, i.amount AS invoice_amount
+    FROM promises_to_pay p
+    JOIN customers c ON c.id = p.customer_id
+    JOIN invoices i ON i.id = p.invoice_id
+    WHERE p.status = 'active'
+    ORDER BY p.promise_date ASC
+  `).all();
+
+  const openInvoices = db.prepare(`
+    SELECT i.*, cp.collection_grade, cp.broken_ptp_count, cp.on_time_rate,
+      cp.late_payment_rate, cp.early_payment_rate, cp.avg_days_to_pay AS cp_avg_days,
+      CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_active_ptp,
+      CASE WHEN d.id IS NOT NULL THEN 1 ELSE 0 END AS has_active_dispute,
+      CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END AS has_active_offer
+    FROM invoices i
+    LEFT JOIN customer_profiles cp ON cp.customer_id = i.customer_id
+    LEFT JOIN promises_to_pay p ON p.invoice_id = i.id AND p.status = 'active'
+    LEFT JOIN disputes d ON d.invoice_id = i.id AND d.status IN ('open','under_review')
+    LEFT JOIN discount_offers o ON o.invoice_id = i.id AND o.status = 'active'
+    WHERE i.status != 'paid'
+  `).all();
+
+  const funnel = { P1:0, P2:0, P3:0, P4:0, P5:0, P6:0 };
+  const funnelAmounts = { P1:0, P2:0, P3:0, P4:0, P5:0, P6:0 };
+  for (const inv of openInvoices) {
+    const profile = {
+      collection_grade: inv.collection_grade, broken_ptp_count: inv.broken_ptp_count || 0,
+      avg_days_to_pay: inv.cp_avg_days || 30, late_payment_rate: inv.late_payment_rate || 0.3,
+      on_time_rate: inv.on_time_rate || 0.5, early_payment_rate: inv.early_payment_rate || 0.1,
+    };
+    const p = computePriority(inv, profile, inv.has_active_ptp === 1, inv.has_active_dispute === 1, inv.has_active_offer === 1);
+    if (p.tier) { funnel[p.tier]++; funnelAmounts[p.tier] += inv.amount; }
+  }
+
+  const dso_trend = db.prepare(
+    'SELECT month, AVG(days_to_pay) AS avg_dtp, COUNT(*) AS count FROM payment_history GROUP BY month ORDER BY month DESC LIMIT 6'
+  ).all().reverse();
+
+  const thirtyStr = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+  const committed = active_ptps.filter(p => p.promise_date <= thirtyStr).reduce((s, p) => s + p.promised_amount, 0);
+  const likely    = openInvoices.filter(i => (i.collection_grade === 'easy' || i.collection_grade === 'moderate') && i.days_past_due < 15).reduce((s, i) => s + i.amount, 0);
+  const at_risk   = openInvoices.filter(i => i.collection_grade === 'medium' || (i.days_past_due >= 15 && i.days_past_due < 45)).reduce((s, i) => s + i.amount, 0);
+  const unlikely  = openInvoices.filter(i => (i.collection_grade === 'risky' || i.collection_grade === 'high_risk') && i.days_past_due >= 45).reduce((s, i) => s + i.amount, 0);
+
+  const aging = {
+    current:    openInvoices.filter(i => i.days_past_due <= 0).reduce((s, i) => s + i.amount, 0),
+    dpd_1_30:   openInvoices.filter(i => i.days_past_due > 0  && i.days_past_due <= 30).reduce((s, i) => s + i.amount, 0),
+    dpd_31_60:  openInvoices.filter(i => i.days_past_due > 30 && i.days_past_due <= 60).reduce((s, i) => s + i.amount, 0),
+    dpd_61_90:  openInvoices.filter(i => i.days_past_due > 60 && i.days_past_due <= 90).reduce((s, i) => s + i.amount, 0),
+    dpd_90plus: openInvoices.filter(i => i.days_past_due > 90).reduce((s, i) => s + i.amount, 0),
+  };
+
+  res.json({ active_ptps, funnel, funnel_amounts: funnelAmounts, dso_trend, cash_forecast: { committed, likely, at_risk, unlikely }, aging });
 });
 
 const PORT = 3001;
